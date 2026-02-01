@@ -67,7 +67,7 @@ class Worker(QThread):
                 response = requests.get(
                     cfg["url"],
                     headers=cfg.get("headers", {}),
-                    timeout=20
+                    timeout=30
                 )
                 response.raise_for_status()
             except Exception as e:
@@ -150,11 +150,11 @@ class Worker(QThread):
         for j, job in enumerate(reversed(all_jobs), 1):
             ws.insert_rows(2)
             try:
-                ws.cell(row=2, column=1, value=job[0])  # Date
+                ws.cell(row=2, column=1, value=job[0])                          # Date
                 ws.cell(row=2, column=2, value=datetime.now().strftime("%H:%M:%S"))  # Time
-                ws.cell(row=2, column=3, value=job[1])  # Company
-                ws.cell(row=2, column=4, value=job[2])  # Role
-                ws.cell(row=2, column=5, value=job[3])  # Role description
+                ws.cell(row=2, column=3, value=job[1])                          # Company
+                ws.cell(row=2, column=4, value=job[2])                          # Role
+                ws.cell(row=2, column=5, value=job[3])                          # Role description
             except IllegalCharacterError:
                 cleaned = "".join(c for c in job[3] if c.isprintable())
                 ws.cell(row=2, column=5, value=cleaned)
@@ -167,7 +167,7 @@ class Worker(QThread):
 
 
 # ---------------------------------------------------------------------------
-# GUI (unchanged)
+# GUI
 # ---------------------------------------------------------------------------
 
 class ScraperApp(QMainWindow):

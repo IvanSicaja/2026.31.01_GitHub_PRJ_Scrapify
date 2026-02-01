@@ -8,6 +8,7 @@ from openpyxl.utils.exceptions import IllegalCharacterError
 from datetime import date, datetime
 import importlib
 import os
+import pyperclip  # pip install pyperclip if not already installed
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QPushButton, QVBoxLayout, QHBoxLayout,
     QWidget, QLabel, QMessageBox, QProgressBar, QTextEdit, QComboBox,
@@ -17,7 +18,7 @@ from PyQt6.QtGui import QPalette, QColor
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
 
 # ---------------------------------------------------------------------------
-# WORKER THREAD
+# WORKER THREAD (unchanged)
 # ---------------------------------------------------------------------------
 
 class Worker(QThread):
@@ -35,7 +36,6 @@ class Worker(QThread):
         all_jobs = []  # (date, company, title, description)
         today_date = date.today().strftime("%m/%d/%Y")
         total = len(self.selected_companies)
-
         for idx, company in enumerate(self.selected_companies, 1):
             module_name = company.lower().replace(" ", "_")
             try:
@@ -53,14 +53,11 @@ class Worker(QThread):
                 errors.append(err)
                 self.log.emit(f"✗ {err}")
                 continue
-
             self.log.emit(f"\n── {company} ({idx}/{total}) ──")
             if cfg.get("note"):
                 self.log.emit(f" ℹ {cfg['note']}")
-
             base_progress = int((idx - 1) / total * 80)
             company_progress_range = int(80 / total) if total > 0 else 0
-
             # Fetch listing page
             self.status.emit(f"[{company}] Fetching listings page…")
             try:
@@ -76,7 +73,6 @@ class Worker(QThread):
                 self.log.emit(f" ✗ {err}")
                 continue
             self.progress.emit(base_progress + int(company_progress_range * 0.15))
-
             soup = BeautifulSoup(response.text, "html.parser")
             try:
                 job_list = listing_parser(soup)
@@ -85,16 +81,13 @@ class Worker(QThread):
                 errors.append(err)
                 self.log.emit(f" ✗ {err}")
                 continue
-
             num_jobs = len(job_list)
             if num_jobs == 0:
                 self.log.emit(f" ⚠ No job postings found.")
                 self.progress.emit(base_progress + company_progress_range)
                 continue
-
             self.log.emit(f" Found {num_jobs} posting(s)")
             self.progress.emit(base_progress + int(company_progress_range * 0.25))
-
             # Fetch details
             detail_step = (company_progress_range * 0.60) / num_jobs if num_jobs else 0
             for i, (title, detail_url) in enumerate(job_list, 1):
@@ -107,9 +100,7 @@ class Worker(QThread):
                     )
                     detail_resp.raise_for_status()
                     detail_soup = BeautifulSoup(detail_resp.text, "html.parser")
-
                     description = detail_parser(detail_soup)
-
                     if description.strip():
                         all_jobs.append((today_date, company, title, description.strip()))
                         self.log.emit(f" ✔ {title}")
@@ -119,21 +110,16 @@ class Worker(QThread):
                     err = f"{company} ({title}): {str(e)}"
                     errors.append(err)
                     self.log.emit(f" ✗ {err}")
-
                 self.progress.emit(base_progress + int(company_progress_range * 0.25 + i * detail_step))
                 time.sleep(0.4)
-
             self.progress.emit(base_progress + company_progress_range)
-
         # Save to Excel
         if not all_jobs:
             self.finished.emit(True, "No jobs collected.", errors)
             return
-
         self.status.emit("Saving to Excel…")
         file_name = "Scrapify.xlsx"
         sheet_name = "Sheet1"
-
         try:
             wb = openpyxl.load_workbook(file_name)
         except FileNotFoundError:
@@ -141,33 +127,28 @@ class Worker(QThread):
             ws = wb.active
             ws.title = sheet_name
             ws.append(["Date", "Time", "Company", "Role", "Role description"])
-
         ws = wb[sheet_name]
-
         insert_step = 15 / len(all_jobs) if all_jobs else 0
         prog = 80
-
         for j, job in enumerate(reversed(all_jobs), 1):
             ws.insert_rows(2)
             try:
-                ws.cell(row=2, column=1, value=job[0])                          # Date
-                ws.cell(row=2, column=2, value=datetime.now().strftime("%H:%M:%S"))  # Time
-                ws.cell(row=2, column=3, value=job[1])                          # Company
-                ws.cell(row=2, column=4, value=job[2])                          # Role
-                ws.cell(row=2, column=5, value=job[3])                          # Role description
+                ws.cell(row=2, column=1, value=job[0]) # Date
+                ws.cell(row=2, column=2, value=datetime.now().strftime("%H:%M:%S")) # Time
+                ws.cell(row=2, column=3, value=job[1]) # Company
+                ws.cell(row=2, column=4, value=job[2]) # Role
+                ws.cell(row=2, column=5, value=job[3]) # Role description
             except IllegalCharacterError:
                 cleaned = "".join(c for c in job[3] if c.isprintable())
                 ws.cell(row=2, column=5, value=cleaned)
             prog += insert_step
             self.progress.emit(int(prog))
-
         wb.save(file_name)
         self.progress.emit(100)
         self.finished.emit(True, f"Added {len(all_jobs)} job(s) to {file_name}.", errors)
 
-
 # ---------------------------------------------------------------------------
-# GUI
+# GUI – with dark theme for QMessageBox + Copy Logs button in success popup
 # ---------------------------------------------------------------------------
 
 class ScraperApp(QMainWindow):
@@ -192,6 +173,19 @@ class ScraperApp(QMainWindow):
             QPushButton:hover { background-color: #0070e0; }
             QPushButton:disabled { background-color: #444; color: #888; }
         """)
+
+        # Apply dark palette globally (helps QMessageBox)
+        palette = QPalette()
+        palette.setColor(QPalette.ColorRole.Window, QColor(30, 30, 30))
+        palette.setColor(QPalette.ColorRole.WindowText, QColor(220, 220, 220))
+        palette.setColor(QPalette.ColorRole.Base, QColor(18, 18, 18))
+        palette.setColor(QPalette.ColorRole.AlternateBase, QColor(35, 35, 35))
+        palette.setColor(QPalette.ColorRole.Text, QColor(220, 220, 220))
+        palette.setColor(QPalette.ColorRole.Button, QColor(50, 50, 50))
+        palette.setColor(QPalette.ColorRole.ButtonText, QColor(220, 220, 220))
+        palette.setColor(QPalette.ColorRole.Highlight, QColor(10, 132, 255))
+        palette.setColor(QPalette.ColorRole.HighlightedText, Qt.GlobalColor.black)
+        QApplication.setPalette(palette)
 
         layout = QVBoxLayout()
         layout.setContentsMargins(20, 18, 20, 18)
@@ -302,8 +296,22 @@ class ScraperApp(QMainWindow):
         self.progress_bar.setVisible(False)
 
         if success:
-            QMessageBox.information(self, "Scrapify", message)
-            self.status_label.setText("Done")
+            msg = QMessageBox(self)
+            msg.setWindowTitle("Scrapify")
+            msg.setText(message)
+            msg.setIcon(QMessageBox.Icon.Information)
+
+            # Add custom "Copy Logs" button
+            copy_btn = msg.addButton("Copy Logs", QMessageBox.ButtonRole.ActionRole)
+            msg.addButton(QMessageBox.StandardButton.Ok)
+
+            msg.exec()
+
+            # Check which button was clicked
+            if msg.clickedButton() == copy_btn:
+                logs = self.log_text.toPlainText()
+                pyperclip.copy(logs)
+                QMessageBox.information(self, "Copied", "Full logs copied to clipboard.")
         else:
             QMessageBox.critical(self, "Error", message)
             self.status_label.setText("Failed")

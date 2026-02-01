@@ -5,9 +5,9 @@ from bs4 import BeautifulSoup
 import openpyxl
 from openpyxl import Workbook
 from openpyxl.utils.exceptions import IllegalCharacterError
-from datetime import date
+from datetime import date, datetime
 import importlib
-import os                              # ← ADDED THIS LINE – fixes the NameError
+import os
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QPushButton, QVBoxLayout, QHBoxLayout,
     QWidget, QLabel, QMessageBox, QProgressBar, QTextEdit, QComboBox,
@@ -32,7 +32,7 @@ class Worker(QThread):
 
     def run(self):
         errors = []
-        all_jobs = []
+        all_jobs = []  # (date, company, title, description)
         today_date = date.today().strftime("%m/%d/%Y")
         total = len(self.selected_companies)
 
@@ -61,7 +61,7 @@ class Worker(QThread):
             base_progress = int((idx - 1) / total * 80)
             company_progress_range = int(80 / total) if total > 0 else 0
 
-            # ── 1. Fetch listing page ────────────────────────────────
+            # Fetch listing page
             self.status.emit(f"[{company}] Fetching listings page…")
             try:
                 response = requests.get(
@@ -77,7 +77,6 @@ class Worker(QThread):
                 continue
             self.progress.emit(base_progress + int(company_progress_range * 0.15))
 
-            # ── 2. Parse listing page → job list ─────────────────────
             soup = BeautifulSoup(response.text, "html.parser")
             try:
                 job_list = listing_parser(soup)
@@ -86,15 +85,17 @@ class Worker(QThread):
                 errors.append(err)
                 self.log.emit(f" ✗ {err}")
                 continue
+
             num_jobs = len(job_list)
             if num_jobs == 0:
-                self.log.emit(f" ⚠ No job postings found (page may require JS rendering).")
+                self.log.emit(f" ⚠ No job postings found.")
                 self.progress.emit(base_progress + company_progress_range)
                 continue
+
             self.log.emit(f" Found {num_jobs} posting(s)")
             self.progress.emit(base_progress + int(company_progress_range * 0.25))
 
-            # ── 3. Fetch each job detail page ────────────────────────
+            # Fetch details
             detail_step = (company_progress_range * 0.60) / num_jobs if num_jobs else 0
             for i, (title, detail_url) in enumerate(job_list, 1):
                 self.status.emit(f"[{company}] {i}/{num_jobs}: {title}")
@@ -102,70 +103,71 @@ class Worker(QThread):
                     detail_resp = requests.get(
                         detail_url,
                         headers=cfg.get("headers", {}),
-                        timeout=15
+                        timeout=30
                     )
                     detail_resp.raise_for_status()
-                except Exception as e:
-                    err = f"{company} ({title}): Fetch detail error: {str(e)}"
-                    errors.append(err)
-                    self.log.emit(f" ✗ Skipped (fetch error): {title} — {str(e)}")
-                    self.progress.emit(int(base_progress + 0.25 * company_progress_range + i * detail_step))
-                    continue
-                detail_soup = BeautifulSoup(detail_resp.text, "html.parser")
-                try:
+                    detail_soup = BeautifulSoup(detail_resp.text, "html.parser")
+
                     description = detail_parser(detail_soup)
+
+                    if description.strip():
+                        all_jobs.append((today_date, company, title, description.strip()))
+                        self.log.emit(f" ✔ {title}")
+                    else:
+                        self.log.emit(f" ✗ No description: {title}")
                 except Exception as e:
-                    err = f"{company} ({title}): Detail parser error: {str(e)}"
+                    err = f"{company} ({title}): {str(e)}"
                     errors.append(err)
-                    self.log.emit(f" ✗ Skipped (parse error): {title} — {str(e)}")
-                    self.progress.emit(int(base_progress + 0.25 * company_progress_range + i * detail_step))
-                    continue
-                if description.strip():
-                    all_jobs.append((today_date, company, title, description.strip()))
-                    self.log.emit(f" ✔ {title}")
-                else:
-                    self.log.emit(f" ✗ No description: {title}")
-                self.progress.emit(int(base_progress + 0.25 * company_progress_range + i * detail_step))
-                time.sleep(0.4)  # polite delay
+                    self.log.emit(f" ✗ {err}")
+
+                self.progress.emit(base_progress + int(company_progress_range * 0.25 + i * detail_step))
+                time.sleep(0.4)
 
             self.progress.emit(base_progress + company_progress_range)
 
-        # ── 4. Write to Excel ────────────────────────────────────────
+        # Save to Excel
         if not all_jobs:
-            self.finished.emit(True, "Scraping complete — no job descriptions were collected.", errors)
+            self.finished.emit(True, "No jobs collected.", errors)
             return
-        self.status.emit("Preparing Excel file…")
+
+        self.status.emit("Saving to Excel…")
         file_name = "Scrapify.xlsx"
         sheet_name = "Sheet1"
+
         try:
             wb = openpyxl.load_workbook(file_name)
         except FileNotFoundError:
             wb = Workbook()
             ws = wb.active
             ws.title = sheet_name
-            ws.append(["Date", "Company", "Role", "Role description"])
+            ws.append(["Date", "Time", "Company", "Role", "Role description"])
+
         ws = wb[sheet_name]
-        self.status.emit("Inserting jobs…")
+
         insert_step = 15 / len(all_jobs) if all_jobs else 0
+        prog = 80
+
         for j, job in enumerate(reversed(all_jobs), 1):
             ws.insert_rows(2)
             try:
-                ws.cell(row=2, column=1, value=job[0])
-                ws.cell(row=2, column=2, value=job[1])
-                ws.cell(row=2, column=3, value=job[2])
-                ws.cell(row=2, column=4, value=job[3])
+                ws.cell(row=2, column=1, value=job[0])  # Date
+                ws.cell(row=2, column=2, value=datetime.now().strftime("%H:%M:%S"))  # Time
+                ws.cell(row=2, column=3, value=job[1])  # Company
+                ws.cell(row=2, column=4, value=job[2])  # Role
+                ws.cell(row=2, column=5, value=job[3])  # Role description
             except IllegalCharacterError:
                 cleaned = "".join(c for c in job[3] if c.isprintable())
-                ws.cell(row=2, column=4, value=cleaned)
-            self.progress.emit(80 + int(j * insert_step))
-        self.status.emit("Saving…")
+                ws.cell(row=2, column=5, value=cleaned)
+            prog += insert_step
+            self.progress.emit(int(prog))
+
         wb.save(file_name)
         self.progress.emit(100)
-        self.status.emit("Done")
         self.finished.emit(True, f"Added {len(all_jobs)} job(s) to {file_name}.", errors)
 
+
 # ---------------------------------------------------------------------------
-# GUI
+# GUI (unchanged)
 # ---------------------------------------------------------------------------
 
 class ScraperApp(QMainWindow):
@@ -175,99 +177,22 @@ class ScraperApp(QMainWindow):
         self.setFixedSize(560, 520)
         self.setStyleSheet("""
             QMainWindow { background-color: #1e1e1e; }
-            QLabel {
-                color: #e0e0e0;
-                font-size: 14px;
-                font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-            }
-            QGroupBox {
-                color: #aaa;
-                font-size: 13px;
-                font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-                border: 1px solid #333;
-                border-radius: 8px;
-                margin-top: 10px;
-                padding-top: 8px;
-            }
-            QGroupBox::title {
-                subcontrol-origin: margin;
-                left: 12px;
-                padding: 0 6px;
-            }
-            QRadioButton {
-                color: #ccc;
-                font-size: 13px;
-                font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-                spacing: 6px;
-            }
-            QRadioButton::indicator {
-                width: 16px;
-                height: 16px;
-                border-radius: 8px;
-                border: 2px solid #555;
-                background: #2a2a2a;
-            }
-            QRadioButton::indicator:checked {
-                background: #0a84ff;
-                border-color: #0a84ff;
-            }
-            QComboBox {
-                background-color: #2a2a2a;
-                color: #e0e0e0;
-                border: 1px solid #444;
-                border-radius: 8px;
-                padding: 6px 10px;
-                font-size: 13px;
-                font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-            }
-            QComboBox:disabled {
-                background-color: #1e1e1e;
-                color: #555;
-                border-color: #333;
-            }
-            QComboBox::drop-down { border: none; }
-            QComboBox::down-arrow { image: none; border: none; }
-            QComboBox QAbstractItemView {
-                background-color: #2a2a2a;
-                color: #e0e0e0;
-                border-radius: 6px;
-                selection-background-color: #0a84ff;
-            }
-            QProgressBar {
-                height: 14px;
-                border-radius: 7px;
-                background: #2a2a2a;
-                text-align: center;
-                color: #aaa;
-                font-size: 11px;
-            }
-            QProgressBar::chunk {
-                background-color: #0a84ff;
-                border-radius: 7px;
-            }
-            QTextEdit {
-                background-color: #121212;
-                color: #d0d0d0;
-                border: none;
-                border-radius: 10px;
-                padding: 10px;
-                font-family: SF Mono, Menlo, Consolas, monospace;
-                font-size: 12px;
-            }
-            QPushButton {
-                background-color: #0a84ff;
-                color: white;
-                border: none;
-                border-radius: 12px;
-                padding: 12px;
-                font-size: 15px;
-                font-weight: 600;
-                font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-            }
+            QLabel { color: #e0e0e0; font-size: 14px; font-family: -apple-system, sans-serif; }
+            QGroupBox { color: #aaa; font-size: 13px; border: 1px solid #333; border-radius: 8px; margin-top: 10px; padding-top: 8px; }
+            QGroupBox::title { subcontrol-origin: margin; left: 12px; padding: 0 6px; }
+            QRadioButton { color: #ccc; font-size: 13px; spacing: 6px; }
+            QRadioButton::indicator { width: 16px; height: 16px; border-radius: 8px; border: 2px solid #555; background: #2a2a2a; }
+            QRadioButton::indicator:checked { background: #0a84ff; border-color: #0a84ff; }
+            QComboBox { background-color: #2a2a2a; color: #e0e0e0; border: 1px solid #444; border-radius: 8px; padding: 6px 10px; font-size: 13px; }
+            QComboBox:disabled { background-color: #1e1e1e; color: #555; border-color: #333; }
+            QProgressBar { height: 14px; border-radius: 7px; background: #2a2a2a; text-align: center; color: #aaa; font-size: 11px; }
+            QProgressBar::chunk { background-color: #0a84ff; border-radius: 7px; }
+            QTextEdit { background-color: #121212; color: #d0d0d0; border: none; border-radius: 10px; padding: 10px; font-family: Consolas, monospace; font-size: 12px; }
+            QPushButton { background-color: #0a84ff; color: white; border: none; border-radius: 12px; padding: 12px; font-size: 15px; font-weight: 600; }
             QPushButton:hover { background-color: #0070e0; }
-            QPushButton:pressed { background-color: #0060c0; }
             QPushButton:disabled { background-color: #444; color: #888; }
         """)
+
         layout = QVBoxLayout()
         layout.setContentsMargins(20, 18, 20, 18)
         layout.setSpacing(10)
@@ -293,7 +218,6 @@ class ScraperApp(QMainWindow):
         self.company_combo = QComboBox()
         self.company_combo.setFixedHeight(30)
         self.company_combo.setEnabled(False)
-        # Populate with companies from parsers/ folder
         parsers_folder = "parsers"
         available_companies = []
         if os.path.exists(parsers_folder):
@@ -302,7 +226,6 @@ class ScraperApp(QMainWindow):
                     name = file[:-3].replace("_", " ").title()
                     available_companies.append(name)
         self.company_combo.addItems(sorted(available_companies))
-        # Add no-config placeholders
         for name in ["Hexagon AB", "Flink Robotics"]:
             self.company_combo.addItem(f"{name} (no config)")
         single_row.addWidget(self.company_combo, stretch=1)
@@ -339,7 +262,6 @@ class ScraperApp(QMainWindow):
 
     def _get_selected_companies(self):
         if self.radio_all.isChecked():
-            # Collect all companies from parsers folder
             companies = []
             parsers_folder = "parsers"
             if os.path.exists(parsers_folder):

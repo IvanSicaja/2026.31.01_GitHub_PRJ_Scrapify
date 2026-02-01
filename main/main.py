@@ -5,16 +5,17 @@ import openpyxl
 from openpyxl import Workbook
 from openpyxl.utils.exceptions import IllegalCharacterError
 from datetime import date
-from PyQt6.QtWidgets import QApplication, QMainWindow, QPushButton, QVBoxLayout, QWidget, QLabel, QMessageBox, \
-    QProgressBar, QTextEdit
+from PyQt6.QtWidgets import (
+    QApplication, QMainWindow, QPushButton, QVBoxLayout, QWidget,
+    QLabel, QMessageBox, QProgressBar, QTextEdit
+)
 from PyQt6.QtGui import QPalette, QColor
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
-
 
 class Worker(QThread):
     progress = pyqtSignal(int)
     status = pyqtSignal(str)
-    log = pyqtSignal(str)
+    log = pyqtSignal(str)           # now only high-level job success/failure
     finished = pyqtSignal(bool, str)
 
     def run(self):
@@ -23,14 +24,12 @@ class Worker(QThread):
             company = "RIVR"
             today_date = date.today().strftime("%m/%d/%Y")
 
-            self.status.emit("Fetching job listings...")
-            self.log.emit("Checkpoint: Fetching job listings page.")
+            self.status.emit("Fetching job listings page...")
             response = requests.get(url)
             response.raise_for_status()
             self.progress.emit(10)
-            self.log.emit("Checkpoint: Listings page fetched successfully.")
+            self.status.emit("Listings page fetched successfully")
 
-            self.status.emit("Parsing job listings...")
             soup = BeautifulSoup(response.text, 'html.parser')
             postings = soup.find_all('div', class_='posting')
             num_jobs = len(postings)
@@ -38,11 +37,11 @@ class Worker(QThread):
                 self.finished.emit(True, "No new jobs found.")
                 return
 
-            self.log.emit(f"Checkpoint: Found {num_jobs} job postings.")
+            self.status.emit(f"Found {num_jobs} job postings")
             self.progress.emit(20)
 
             jobs = []
-            job_progress_step = 60 / num_jobs if num_jobs > 0 else 0  # 20% to 80%
+            job_progress_step = 60 / num_jobs if num_jobs > 0 else 0
             current_progress = 20
 
             for i, post in enumerate(postings, 1):
@@ -53,14 +52,14 @@ class Worker(QThread):
 
                 link_elem = post.find('a', class_='posting-title')
                 if not link_elem:
+                    self.log.emit(f"✗ Skipped (no link): {title}")
                     continue
                 job_url = link_elem['href']
 
                 self.status.emit(f"Fetching details for job {i}/{num_jobs}: {title}")
-                self.log.emit(f"Checkpoint: Fetching details for job {i}/{num_jobs}.")
                 detail_response = requests.get(job_url)
                 detail_response.raise_for_status()
-                self.log.emit(f"Checkpoint: Details fetched for job {i}/{num_jobs}.")
+                self.status.emit(f"Details fetched for job {i}/{num_jobs}")
 
                 self.status.emit(f"Parsing description for job {i}/{num_jobs}")
                 detail_soup = BeautifulSoup(detail_response.text, 'html.parser')
@@ -70,21 +69,21 @@ class Worker(QThread):
                     text = section.get_text(separator='\n', strip=True)
                     description += text + "\n\n"
 
-                if description:
+                if description.strip():
                     jobs.append((today_date, company, title, description))
+                    self.log.emit(f"✔ Scraped: {title}")
+                else:
+                    self.log.emit(f"✗ No description: {title}")
 
                 current_progress += job_progress_step
                 self.progress.emit(int(current_progress))
-                self.log.emit(f"Checkpoint: Parsed job {i}/{num_jobs}.")
+                self.status.emit(f"Processed job {i}/{num_jobs}")
 
             if not jobs:
                 self.finished.emit(True, "No valid jobs found after parsing.")
                 return
 
             self.status.emit("Preparing Excel file...")
-            self.log.emit("Checkpoint: Loading or creating Excel file.")
-            self.progress.emit(80)
-
             file_name = "Scrapify.xlsx"
             sheet_name = "Sheet1"
             try:
@@ -97,11 +96,9 @@ class Worker(QThread):
 
             ws = wb[sheet_name]
 
-            self.status.emit("Inserting new jobs into Excel...")
-            self.log.emit("Checkpoint: Inserting jobs into sheet.")
-
-            insert_progress_step = 10 / len(jobs) if jobs else 0  # 80% to 90%
-            for j, job in enumerate(reversed(jobs), 1):  # Reverse to maintain order
+            self.status.emit("Inserting new jobs into sheet...")
+            insert_progress_step = 10 / len(jobs) if jobs else 0
+            for j, job in enumerate(reversed(jobs), 1):
                 ws.insert_rows(2)
                 try:
                     ws.cell(row=2, column=1, value=job[0])
@@ -114,10 +111,9 @@ class Worker(QThread):
                 self.progress.emit(80 + int(j * insert_progress_step))
 
             self.status.emit("Saving Excel file...")
-            self.log.emit("Checkpoint: Saving file.")
             wb.save(file_name)
             self.progress.emit(95)
-            self.log.emit("Checkpoint: File saved successfully.")
+            self.status.emit("File saved successfully")
 
             self.finished.emit(True, f"Added {len(jobs)} new jobs to {file_name}.")
 
@@ -128,22 +124,58 @@ class Worker(QThread):
 class ScraperApp(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Job Scraper")
-        self.setGeometry(100, 100, 500, 400)
+        self.setWindowTitle("Scrapify — Job Scraper")
+        self.setFixedSize(520, 440)
 
-        # Set dark theme
-        self.set_dark_theme()
+        self.setStyleSheet("""
+            QMainWindow { background-color: #1e1e1e; }
+            QLabel {
+                color: #e0e0e0;
+                font-size: 15px;
+                font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+            }
+            QProgressBar {
+                height: 16px;
+                border-radius: 8px;
+                background: #2a2a2a;
+                text-align: center;
+                color: #aaa;
+            }
+            QProgressBar::chunk {
+                background-color: #0a84ff;
+                border-radius: 8px;
+            }
+            QTextEdit {
+                background-color: #121212;
+                color: #d0d0d0;
+                border: none;
+                border-radius: 10px;
+                padding: 10px;
+                font-family: SF Mono, Menlo, monospace;
+                font-size: 13px;
+            }
+            QPushButton {
+                background-color: #0a84ff;
+                color: white;
+                border: none;
+                border-radius: 12px;
+                padding: 12px;
+                font-size: 15px;
+                font-weight: 600;
+                font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+            }
+            QPushButton:hover { background-color: #0070e0; }
+            QPushButton:pressed { background-color: #0060c0; }
+            QPushButton:disabled { background-color: #444; color: #888; }
+        """)
 
-        # Layout
         layout = QVBoxLayout()
+        layout.setContentsMargins(20, 20, 20, 20)
+        layout.setSpacing(16)
 
-        self.label = QLabel("Click the button to scrape jobs from https://jobs.lever.co/rivr")
+        self.label = QLabel("Scrape jobs from https://jobs.lever.co/rivr")
         self.label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(self.label)
-
-        self.scrape_button = QPushButton("Scrape and Save Jobs")
-        self.scrape_button.clicked.connect(self.start_scraper)
-        layout.addWidget(self.scrape_button)
 
         self.status_label = QLabel("Ready")
         self.status_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -157,29 +189,16 @@ class ScraperApp(QMainWindow):
 
         self.log_text = QTextEdit()
         self.log_text.setReadOnly(True)
-        layout.addWidget(self.log_text)
+        layout.addWidget(self.log_text, stretch=1)
 
-        central_widget = QWidget()
-        central_widget.setLayout(layout)
-        self.setCentralWidget(central_widget)
+        self.scrape_button = QPushButton("Run Scraper")
+        self.scrape_button.setFixedHeight(48)
+        self.scrape_button.clicked.connect(self.start_scraper)
+        layout.addWidget(self.scrape_button)
 
-    def set_dark_theme(self):
-        palette = QPalette()
-        palette.setColor(QPalette.ColorRole.Window, QColor(53, 53, 53))
-        palette.setColor(QPalette.ColorRole.WindowText, Qt.GlobalColor.white)
-        palette.setColor(QPalette.ColorRole.Base, QColor(25, 25, 25))
-        palette.setColor(QPalette.ColorRole.AlternateBase, QColor(53, 53, 53))
-        palette.setColor(QPalette.ColorRole.ToolTipBase, Qt.GlobalColor.white)
-        palette.setColor(QPalette.ColorRole.ToolTipText, Qt.GlobalColor.white)
-        palette.setColor(QPalette.ColorRole.Text, Qt.GlobalColor.white)
-        palette.setColor(QPalette.ColorRole.Button, QColor(53, 53, 53))
-        palette.setColor(QPalette.ColorRole.ButtonText, Qt.GlobalColor.white)
-        palette.setColor(QPalette.ColorRole.BrightText, Qt.GlobalColor.red)
-        palette.setColor(QPalette.ColorRole.Link, QColor(42, 130, 218))
-        palette.setColor(QPalette.ColorRole.Highlight, QColor(42, 130, 218))
-        palette.setColor(QPalette.ColorRole.HighlightedText, Qt.GlobalColor.black)
-        QApplication.setPalette(palette)
-        QApplication.setStyle('Fusion')
+        central = QWidget()
+        central.setLayout(layout)
+        self.setCentralWidget(central)
 
     def start_scraper(self):
         self.scrape_button.setEnabled(False)
@@ -195,23 +214,27 @@ class ScraperApp(QMainWindow):
         self.worker.finished.connect(self.scraper_finished)
         self.worker.start()
 
-    def update_progress(self, value):
+    def update_progress(self, value: int):
         self.progress_bar.setValue(value)
 
-    def update_status(self, text):
+    def update_status(self, text: str):
         self.status_label.setText(text)
 
-    def append_log(self, text):
+    def append_log(self, text: str):
         self.log_text.append(text)
+        self.log_text.ensureCursorVisible()
 
-    def scraper_finished(self, success, message):
+    def scraper_finished(self, success: bool, message: str):
         self.progress_bar.setValue(100)
         self.scrape_button.setEnabled(True)
         self.progress_bar.setVisible(False)
+
         if success:
-            QMessageBox.information(self, "Success", message)
+            QMessageBox.information(self, "Scrapify", message)
+            self.status_label.setText("Done")
         else:
             QMessageBox.critical(self, "Error", message)
+            self.status_label.setText("Failed")
 
 
 if __name__ == "__main__":
